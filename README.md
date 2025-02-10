@@ -1,4 +1,9 @@
-📌 Sobre o Projeto
+📌 Sobre o Projeto  
+#DataScan- Versão BETA
+
+![datascan](https://github.com/user-attachments/assets/620389a2-ad97-4c9d-9209-dbb4087052a5)
+
+
 
 DataScan é um que programa permite extrair campos de formulários em documentos (".docx", ".pdf", ".xlsx") ou de uma URL e preenchê-los automaticamente em um template pré pronto.
 
@@ -15,6 +20,7 @@ DataScan é um que programa permite extrair campos de formulários em documentos
 💾 Gera um Novo Documento: Salva o arquivo preenchido com os novos dados.
 
 ⚙️ Instalação
+
 
 1️⃣ Clone o repositório
 git clone https://github.com/Marlon009/DataScan.git

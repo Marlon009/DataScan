@@ -67,7 +67,7 @@ Envie um Pull Request
 
 📜 Licença
 
-Este projeto está licenciado sob a MIT License - veja o arquivo LICENSE para mais detalhes.
+Este projeto está licenciado sob a GPL License - veja o arquivo LICENSE para mais detalhes.
 Desenvolvido por Marlon.
 
 

@@ -6,7 +6,7 @@
 
 
 
-DataScan Pro é uma aplicação desktop para processamento inteligente de dados, integrando IA generativa para análise e automação de tarefas.
+DataScan é uma aplicação desktop para processamento inteligente de dados, integrando IA generativa para análise e automação de tarefas.
 
 ## Funcionalidades
 

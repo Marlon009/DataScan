@@ -1,0 +1,1319 @@
+import os
+import json
+import torch
+import tkinter as tk
+import zipfile
+from tkinter import filedialog, messagebox, simpledialog, ttk
+from PyPDF2 import PdfReader
+from docx import Document
+from openpyxl import load_workbook
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from bs4 import BeautifulSoup
+import validators
+import requests
+import threading
+from queue import Queue
+from urllib.parse import urlparse
+import time
+import pandas as pd
+from datetime import datetime
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib import colors
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+# Adicione no topo do arquivo com os outros imports
+from openpyxl import Workbook
+import re
+
+class Config:
+    MODEL_NAME = "gpt2-medium"
+    PAD_TOKEN = "<|pad|>"
+    MAX_TOKENS = 150
+    MAX_CONTEXT_LENGTH = 3
+    USE_QUANTIZATION = True
+    DEVICE = "cpu"
+    TEMP_DIR = "temp_processing"
+    BACKUP_DIR = "backups"
+    
+    
+    MODEL_LOAD_SETTINGS = {
+        "torch_dtype": torch.float32,
+        "low_cpu_mem_usage": True,
+        "device_map": "cpu",
+        "max_memory": {"cpu": "0.5GB"}
+    }
+    
+     # Nova paleta de cores profissional
+    PRIMARY_COLOR = "#2A3F5F"      # Azul escuro
+    SECONDARY_COLOR = "#4A6572"    # Cinza azulado
+    ACCENT_COLOR = "#F9AA33"       # Laranja dourado
+    BACKGROUND_COLOR = "#E0E0E0"   # Cinza claro
+    TEXT_COLOR = "#FFFFFF"         # Branco
+    CHAT_BG = "#37474F"            # Cinza escuro
+    HOVER_COLOR = "#566573"        # Efeito hover
+    
+
+class DocumentProcessor:
+    def __init__(self):
+        self.document_content = ""
+        self.scraped_data = {}
+        self.chat_history = []
+        self.dialog_context = {
+            'last_action': None,
+            'pending_data': None,
+            'step': 0
+        }
+
+        print("[INIT] Iniciando carregamento do modelo...")
+        try:
+            # Forçar precisão simples
+            torch.set_default_dtype(torch.float32)
+            
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                Config.MODEL_NAME,
+                use_fast=True,
+                legacy=False,
+                pad_token="<|pad|>"
+            )
+            self.tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+            
+            self.model = AutoModelForCausalLM.from_pretrained(
+                Config.MODEL_NAME,
+                **Config.MODEL_LOAD_SETTINGS
+            )
+            self.model.resize_token_embeddings(len(self.tokenizer))
+            
+            # Quantização mais agressiva
+            if Config.USE_QUANTIZATION:
+                self.model = torch.quantization.quantize_dynamic(
+                    self.model,
+                    {torch.nn.Linear},
+                    dtype=torch.qint8,
+                    inplace=True
+                )
+            
+            self.model.eval()
+            print("[SUCESSO] Modelo pronto!")
+            
+        except Exception as e:
+            print(f"[FALHA CRÍTICA] {str(e)}")
+            raise
+        
+        
+    def load_model(self):
+        if self.model is None:
+            self.tokenizer = AutoTokenizer.from_pretrained(Config.MODEL_NAME)
+            self.model = AutoModelForCausalLM.from_pretrained(  # ← Alterado
+                Config.MODEL_NAME,
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=False
+            )
+            self.model.eval()
+        
+    def _classify_intent(self, prompt: str) -> str:
+        """Classifica a intenção do usuário com base no prompt."""
+        prompt_lower = prompt.lower()
+        
+        intents = {
+            'template': ['template', 'modelo', 'criar'],
+            'process': ['processar', 'arquivo', 'documento'],
+            'analyze': ['analisar', 'site', 'web'],
+            'help': ['ajuda', 'comandos', 'como usar']
+        }
+        
+        for intent, keywords in intents.items():
+            if any(kw in prompt_lower for kw in keywords):
+                return intent
+                
+        return 'general'
+
+    def _handle_multi_step(self, prompt: str) -> str:
+        """Gerencia fluxos de diálogo com múltiplas etapas."""
+        if self.dialog_context['last_action'] == 'template_creation':
+            return self._handle_template_flow(prompt)
+            
+        elif self.dialog_context['last_action'] == 'file_processing':
+            return self._handle_file_flow(prompt)
+            
+        elif self.dialog_context['last_action'] == 'website_analysis':
+            return self._handle_website_flow(prompt)
+            
+        return "Por favor, continue sua solicitação."
+
+    def _handle_template_flow(self, prompt: str) -> str:
+        """Gerencia o fluxo de criação de templates."""
+        if self.dialog_context['step'] == 0:
+            self.dialog_context['step'] = 1
+            return (
+                "Vamos criar um template. Por favor, informe:\n"
+                "1. Tipo de template (DOCX/XLSX)\n"
+                "2. Campos necessários (separados por vírgula)\n\n"
+                "Exemplo: 'DOCX, Nome, Data, Valor'"
+            )
+            
+        elif self.dialog_context['step'] == 1:
+            try:
+                parts = [p.strip() for p in prompt.split(',')]
+                template_type = parts[0].lower()
+                fields = parts[1:]
+                
+                if template_type not in ['docx', 'xlsx']:
+                    raise ValueError("Tipo de template inválido.")
+                    
+                output_path = self.generate_template(template_type, fields)
+                
+                self.dialog_context = {'last_action': None, 'pending_data': None, 'step': 0}
+                return (
+                    f"✅ Template criado com sucesso!\n"
+                    f"📂 Caminho: {output_path}\n"
+                    f"📝 Campos: {', '.join(fields)}"
+                )
+            except Exception as e:
+                self.dialog_context = {'last_action': None, 'pending_data': None, 'step': 0}
+                return f"❌ Erro na criação: {str(e)}"
+
+    def _handle_file_flow(self, prompt: str) -> str:
+        """Gerencia o fluxo de processamento de arquivos."""
+        if self.dialog_context['step'] == 0:
+            self.dialog_context['step'] = 1
+            return "Por favor, selecione o arquivo que deseja processar."
+            
+        elif self.dialog_context['step'] == 1:
+            try:
+                content = self.extract_from_file(prompt)
+                self.document_content = content
+                self.dialog_context['step'] = 2
+                return (
+                    "Arquivo processado com sucesso!\n"
+                    "Agora, selecione o template para gerar a saída."
+                )
+            except Exception as e:
+                self.dialog_context = {'last_action': None, 'pending_data': None, 'step': 0}
+                return f"❌ Erro no processamento: {str(e)}"
+
+    def quantize_model(self, model):
+        return torch.quantization.quantize_dynamic(
+            model,
+            {torch.nn.Linear},
+            dtype=torch.qint8
+        )
+
+    def extract_from_file(self, file_path: str) -> str:
+        try:
+            # Verificação de tamanho do arquivo
+            max_size = 50 * 1024 * 1024  # 50MB
+            file_size = os.path.getsize(file_path)
+            if file_size > max_size:
+                raise ValueError(f"Arquivo muito grande ({file_size/1024/1024:.2f}MB > 50MB)")
+                
+            chunk_size = 1024
+            content = []
+            ext = os.path.splitext(file_path)[1].lower()
+
+            # Leitura segura para cada formato
+            if ext == '.pdf':
+                reader = PdfReader(file_path)
+                for page in reader.pages[:10]:
+                    text = page.extract_text() or ""
+                    # Corrigido: Fechamento correto dos colchetes e parênteses
+                    content.extend([text[i:i+chunk_size] for i in range(0, len(text), chunk_size)])
+
+            elif ext == '.docx':
+                doc = Document(file_path)
+                for para in doc.paragraphs[:100]:
+                    if para.text.strip():
+                        content.append(para.text[:chunk_size].replace('\n', ' '))
+
+            elif ext in ('.xlsx', '.xls'):
+                wb = load_workbook(file_path, read_only=True)
+                for sheet in wb:
+                    for row in sheet.iter_rows(values_only=True)[:1000]:
+                        row_content = [str(cell)[:50] for cell in row if cell is not None]
+                        content.append(" | ".join(row_content))
+                    break  # Processa apenas a primeira planilha
+
+            elif ext == '.txt':
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    while True:
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        content.append(chunk.replace('\n', ' '))
+                        if len(content) >= 1000:  # Limite de chunks
+                            break
+            else:
+                raise ValueError(f"Formato não suportado: {ext}")
+
+            full_content = " ".join(content)
+            return full_content[:Config.MAX_TOKENS * 4].strip()
+
+        except Exception as e:
+            raise Exception(f"Erro na extração: {str(e)}")
+    def export_to_pdf(self, data: dict, filename: str):
+        """Exporta dados para PDF com formatação profissional"""
+        try:
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+            
+            # Cabeçalho
+            c.setFillColorRGB(0, 1, 0)  # Verde
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(100, height - 100, "Relatório Gerado por DataScan")
+            c.line(100, height - 110, width - 100, height - 110)
+            
+            # Conteúdo
+            y_position = height - 150
+            c.setFont("Helvetica", 12)
+            c.setFillColorRGB(1, 1, 1)  # Branco
+            
+            # Tabela de dados
+            if 'data' in data and len(data['data']) > 0:
+                table_data = [list(data['data'][0].keys())]  # Cabeçalhos
+                for row in data['data']:
+                    table_data.append([str(v) for v in row.values()])
+                
+                t = Table(table_data)
+                t.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.green),
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0,0), (-1,0), 12),
+                    ('BOTTOMPADDING', (0,0), (-1,0), 12),
+                    ('BACKGROUND', (0,1), (-1,-1), colors.black),
+                    ('TEXTCOLOR', (0,1), (-1,-1), colors.green),
+                    ('GRID', (0,0), (-1,-1), 1, colors.green)
+                ]))
+                
+                t.wrapOn(c, width-200, height)
+                t.drawOn(c, 100, y_position - len(table_data)*20)
+                y_position -= len(table_data)*20 + 50
+
+            # Análise da IA
+            if 'analysis' in data:
+                c.setFont("Helvetica", 10)
+                c.drawString(100, y_position, "Análise da IA:")
+                text_object = c.beginText(100, y_position - 20)
+                text_object.setFont("Helvetica", 10)
+                text_object.setFillColor(colors.green)
+                
+                for line in data['analysis'].split('\n'):
+                    text_object.textLine(line)
+                    y_position -= 12
+                    if y_position < 100:
+                        c.showPage()
+                        y_position = height - 100
+                        text_object = c.beginText(100, y_position)
+                        
+                c.drawText(text_object)
+
+            c.save()
+            return True
+        except Exception as e:
+            raise Exception(f"Erro ao gerar PDF: {str(e)}")
+
+    def scrape_website(self, url: str) -> dict:
+        try:
+            # Configuração de sessão com retries e headers
+            session = requests.Session()
+            session.mount('https://', requests.adapters.HTTPAdapter(
+                max_retries=3,
+                pool_maxsize=10
+            ))
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Accept-Language': 'pt-BR,pt;q=0.9',
+                'Accept-Encoding': 'gzip, deflate'
+            }
+
+            # Validação e normalização da URL
+            url = url.strip().replace(" ", "")
+            if not url:
+                raise ValueError("URL não pode estar vazia")
+            
+            if not url.startswith(('http://', 'https://')):
+                url = f'https://{url}'
+                
+            if not validators.url(url):
+                raise ValueError(f"URL inválida: {url}")
+                
+            parsed_url = urlparse(url)
+            if not validators.domain(parsed_url.hostname):
+                raise ValueError(f"Domínio inválido: {parsed_url.hostname}")
+
+            # Requisição com tratamento de segurança
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=20,
+                verify=True  # Alterar para False se necessário em ambientes controlados
+            )
+            response.raise_for_status()
+
+            # Limitação de tamanho do conteúdo
+            max_content_size = 5000000  # 5MB
+            if len(response.content) > max_content_size:
+                raise ValueError("Conteúdo do site excede o tamanho máximo permitido (5MB)")
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            raw_text = soup.get_text(separator=' ', strip=True)[:4000]
+
+            # Processamento com IA com fallback
+            try:
+                ai_prompt = ("Extraia informações estruturadas deste site...")
+                ai_response = self.generate_ai_response(ai_prompt)
+                structured_data = json.loads(ai_response)
+            except Exception as ai_error:
+                structured_data = {"error": str(ai_error), "content": raw_text[:2000]}
+
+            return {
+                "title": soup.title.string if soup.title else "Sem título",
+                "headers": [header.text.strip() for header in soup.find_all(['h1', 'h2', 'h3'])],
+                "links": [link.get('href') for link in soup.find_all('a') if link.get('href')],
+                "content": raw_text,
+                "structured_data": structured_data,
+                "ai_analysis": ai_response
+            }
+            
+        except Exception as e:
+            raise Exception(f"Erro no scraping: {str(e)}")
+        
+    def generate_ai_response(self, prompt: str) -> str:
+        try:
+            # Configurar padding token
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            # Adicionar prompt ao histórico
+            self.chat_history.append(f"Usuário: {prompt}")
+
+            # Montar o contexto para o modelo
+            context = "\n".join(self.chat_history[-Config.MAX_CONTEXT_LENGTH:])
+            full_prompt = (
+                "Você é o DataScan, um assistente de processamento de dados. "
+                "Responda de forma clara e objetiva em português.\n\n"
+                f"Histórico:\n{context}\n"
+                f"Usuário: {prompt}\n"
+                "DataScan:"
+            )
+
+            # Tokenização
+            inputs = self.tokenizer(
+                full_prompt,
+                return_tensors="pt",
+                max_length=512,
+                truncation=True,
+                padding="max_length"
+            ).to(Config.DEVICE)
+
+            # Geração da resposta
+            outputs = self.model.generate(
+                inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=100,  # Limite de tokens para a resposta
+                temperature=0.7,     # Controla a criatividade
+                top_k=50,            # Limita a escolha de palavras
+                top_p=0.9,           # Usa amostragem de núcleo
+                repetition_penalty=1.2,  # Penaliza repetições
+                do_sample=True,      # Ativa amostragem estocástica
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id  # Forçar parada no EOS
+            )
+
+            # Decodificar a resposta
+            response = self.tokenizer.decode(
+                outputs[0],
+                skip_special_tokens=True
+            ).split("DataScan:")[-1].strip()
+
+            # Limpar caracteres repetidos ou incoerentes
+            response = re.sub(r'\b\w+:\s*(\n|$)', '', response)  # Remove linhas tipo "Category:"
+            response = re.sub(r'\s{3,}', ' ', response)  # Remove espaços excessivos
+            response = response[:500]  # Limite máximo de caracteres
+
+            # Fallback para resposta padrão
+            if not response or len(response) < 3:
+                return "Desculpe, não entendi. Poderia reformular a pergunta?"
+                
+            self.chat_history.append(f"DataScan: {response}")
+            return response
+
+        except Exception as e:
+            return f"Erro na geração: {str(e)}"
+
+    def generate_template(self, template_type: str, fields: list) -> str:
+        try:
+            # Validar tipo de template
+            template_type = template_type.lower()
+            if template_type not in ['docx', 'xlsx']:
+                raise ValueError("Tipo de template inválido. Use 'docx' ou 'xlsx'.")
+
+            if not fields:
+                raise ValueError("A lista de campos não pode estar vazia.")
+
+            # Criar prompt para geração de template
+            prompt = (
+                f"Crie um template {template_type} com os seguintes campos: {', '.join(fields)}. "
+                "Inclua marcações {{campo}} para preenchimento. Formato exemplo:"
+                "\n\nPara DOCX:\n[Nome: {{nome}}]\n[Data: {{data}}]"
+                "\n\nPara Excel:\n| Nome | Data | Valor |"
+            )
+
+            response = self.generate_ai_response(prompt)
+
+            # Definir caminho de saída
+            ext = template_type
+            output_path = os.path.join(Config.TEMP_DIR, f"template_{int(time.time())}.{ext}")
+
+            # Gerar arquivo conforme o tipo
+            if template_type == 'docx':
+                doc = Document()
+                for line in response.split('\n'):
+                    doc.add_paragraph(line)
+                doc.save(output_path)
+
+            elif template_type == 'xlsx':
+                wb = Workbook()
+                ws = wb.active
+                headers = [field.strip() for field in fields]
+                ws.append(headers)
+                wb.save(output_path)
+
+            return output_path
+
+        except ValueError as ve:
+            raise ValueError(f"Erro de validação: {str(ve)}")
+        except Exception as e:
+            raise Exception(f"Erro na geração do template: {str(e)}")
+
+    def fill_template(self, template_path: str, output_path: str, data: dict) -> bool:
+        try:
+            # Combina dados tradicionais e estruturados
+            full_data = {
+                **data.get('structured_data', {}),
+                **{f"raw_{k}": v for k, v in data.items()}
+            }
+            
+            ext = os.path.splitext(template_path)[1].lower()
+            if ext == '.docx':
+                self.fill_docx_template(template_path, output_path, full_data)
+            elif ext in ('.xlsx', '.xls'):
+                self.fill_excel_template(template_path, full_data).save(output_path)
+            elif ext == '.pdf':
+                raise NotImplementedError("Preenchimento de PDF não implementado")
+            return True
+        except Exception as e:
+            raise Exception(f"Erro no template: {str(e)}")
+
+    def fill_docx_template(self, template_path: str, output_path: str, data: dict):
+        doc = Document(template_path)
+        for para in doc.paragraphs:
+            if '{{' in para.text:
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        value = ', '.join(value)
+                    para.text = para.text.replace(f'{{{{{key}}}}}', str(value))
+        doc.save(output_path)
+
+    def fill_excel_template(self, template_path: str, data: dict):
+        wb = load_workbook(template_path)
+        for sheet in wb:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if cell.value and '{{' in str(cell.value):
+                        for key, value in data.items():
+                            if isinstance(value, list):
+                                value = ', '.join(value)
+                            cell.value = str(cell.value).replace(f'{{{{{key}}}}}', str(value))
+        return wb
+
+
+class Application:
+    def __init__(self):
+        
+        self.root = tk.Tk()
+        self.root.title("DataScan")
+        self.root.geometry("1200x800")
+        
+        # Verificar memória antes de iniciar
+        if self.get_available_memory() < 1.20:  # 3GB mínimo
+            messagebox.showerror("Erro", 
+                "Memória insuficiente! Feche outros programas e tente novamente.")
+            self.root.destroy()
+            return
+            
+        
+        
+        self.root.configure(bg=Config.BACKGROUND_COLOR)
+        self.status_var = tk.StringVar()
+        self.process_file_btn = None
+        self.scrape_btn = None
+        self.chat_btn = None
+        self.template_btn = None
+        
+        self.processor = DocumentProcessor()
+        self.ui_queue = Queue()
+        self.progress_window = None
+        self.progress_bar = None
+        
+        self.setup_ui()
+        self.setup_ui_handler()
+        self.current_chart_window = None
+        self.tree = None
+        self.setup_db_explorer()
+        # Carregar modelo em thread separada
+        self.loading_complete = False
+        threading.Thread(target=self.initialize_model, daemon=True).start()
+        
+    def get_available_memory(self):
+        import psutil
+        mem = psutil.virtual_memory()
+        # Converter usando 1024 para GiB corretamente
+        total_gib = mem.total / (1024 ** 3)
+        available_gib = mem.available / (1024 ** 3)
+        print(f"[MEMÓRIA] Total: {total_gib:.2f}GiB | Disponível: {available_gib:.2f}GiB")
+        return available_gib
+    
+    def initialize_model(self):
+        try:
+            self.processor = DocumentProcessor()
+            self.loading_complete = True
+            print("Modelo carregado com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro Fatal", f"Falha ao carregar IA: {str(e)}")
+            self.root.quit()
+
+    def setup_ui(self):
+        main_frame = tk.Frame(self.root, bg=Config.BACKGROUND_COLOR)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # Frame centralizado
+        center_frame = tk.Frame(main_frame, bg=Config.BACKGROUND_COLOR)
+        center_frame.place(relx=0.5, rely=0.5, anchor='center')
+
+        # Título moderno
+        title_frame = tk.Frame(center_frame, bg=Config.BACKGROUND_COLOR)
+        title_frame.pack(pady=20)
+        
+        self.title_label = tk.Label(
+            title_frame,
+            text="DataScan",
+            font=("Segoe UI", 34, "bold"),
+            fg=Config.PRIMARY_COLOR,
+            bg=Config.BACKGROUND_COLOR
+        )
+        self.title_label.pack()
+        
+        self.subtext_label = tk.Label(
+            title_frame,
+            text="Intelligent Data Processing",
+            font=("Segoe UI", 18),
+            fg=Config.SECONDARY_COLOR,
+            bg=Config.BACKGROUND_COLOR
+        )
+        self.subtext_label.pack()
+        
+            # Adicionar barra de status
+        self.status_bar = tk.Label(
+            self.root, 
+            textvariable=self.status_var,
+            bg=Config.SECONDARY_COLOR,
+            fg=Config.TEXT_COLOR,
+            anchor=tk.W
+        )
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        self.subtext2_label = tk.Label(
+            title_frame,
+            text="By: github.com/Marlon009",
+            font=("Segoe UI", 12, "italic"),
+            fg=Config.SECONDARY_COLOR,
+            bg=Config.BACKGROUND_COLOR
+        )
+        self.subtext2_label.pack()
+
+        # Botões principais
+        button_frame = tk.Frame(center_frame, bg=Config.BACKGROUND_COLOR)
+        button_frame.pack(pady=30)
+
+        button_style = {
+            'font': ('Segoe UI', 12),
+            'width': 20,
+            'height': 2,
+            'bg': Config.PRIMARY_COLOR,
+            'fg': Config.TEXT_COLOR,
+            'activebackground': Config.HOVER_COLOR,
+            'activeforeground': Config.TEXT_COLOR,
+            'relief': 'flat',
+            'borderwidth': 0,
+            'cursor': 'hand2'
+        }
+
+        buttons = [
+            ("📁 Processar Arquivo", self.process_file),
+            ("🌐 Scraping Web", self.scrape_website),
+            ("💬 Terminal IA", self.chat_with_ai),
+            ("💾 Backup", self.create_backup)
+        ]
+
+        for text, cmd in buttons:
+            btn = tk.Button(button_frame, text=text, compound=tk.LEFT, **button_style)
+            btn.config(command=cmd)
+            btn.bind("<Enter>", lambda e: e.widget.config(bg=Config.ACCENT_COLOR))
+            btn.bind("<Leave>", lambda e: e.widget.config(bg=Config.PRIMARY_COLOR))
+            btn.pack(side=tk.LEFT, padx=10, pady=5)
+            
+            
+    def is_command(self, query: str) -> bool:
+        """Verifica se a entrada do usuário é um comando especial."""
+        command_map = {
+            'criar template': self.handle_template_creation,
+            'processar arquivo': self.process_file,
+            'analisar site': self.scrape_website,
+            'ajuda': self.show_help,
+            'limpar': self.clear_chat_context,
+            'sair': lambda: self.root.quit()
+        }
+        
+        return any(cmd in query.lower() for cmd in command_map.keys())
+    
+    # Na classe Application, adicione este método:
+    def clean_input(self, text: str) -> str:
+        """Limpa e padroniza o input do usuário"""
+        # Remove espaços extras e caracteres especiais
+        cleaned = text.strip()
+        # Remove múltiplos espaços internos
+        cleaned = ' '.join(cleaned.split())
+        return cleaned      
+
+    def show_progress(self, message: str):
+        if self.progress_window is None:
+            self.progress_window = tk.Toplevel(self.root)
+            self.progress_window.title("Processando")
+            self.progress_window.configure(bg='#0a0a0a')
+            
+            self.progress_label = tk.Label(
+                self.progress_window,
+                text=message,
+                font=("Segoe UI", 12),
+                fg="#00ff00",
+                bg='#0a0a0a'
+            )
+            self.progress_label.pack(padx=30, pady=15)
+            
+            self.progress_bar = ttk.Progressbar(
+                self.progress_window,
+                orient=tk.HORIZONTAL,
+                length=400,
+                mode='indeterminate',
+                style='green.Horizontal.TProgressbar'
+            )
+            self.progress_bar.pack(pady=15)
+            
+            style = ttk.Style()
+            style.theme_use('clam')
+            style.configure(
+                'green.Horizontal.TProgressbar',
+                background='#00ff00',
+                troughcolor='#002200'
+            )
+            
+            self.progress_window.grab_set()
+
+    def update_progress(self, value: int, message: str = None):
+        """Atualiza o valor da barra de progresso e a mensagem."""
+        if self.progress_bar:
+            self.progress_bar['value'] = value
+            if message and self.progress_label:
+                self.progress_label.config(text=message)
+            self.progress_window.update_idletasks()
+
+    def hide_progress(self):
+        """Fecha a janela de progresso."""
+        if self.progress_window:
+            self.progress_window.grab_release()
+            self.progress_window.destroy()
+            self.progress_window = None
+            self.progress_bar = None
+            self.progress_label = None
+
+    def process_file(self):
+        """Inicia o processamento de arquivo com barra de progresso."""
+        self.ui_command('disable_buttons')
+        self.ui_command('update_status', "Aguardando seleção de arquivo...")
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Documentos", "*.pdf *.docx *.xlsx *.txt"), ("Todos", "*.*")]
+        )
+        if file_path:
+            self.ui_command('show_progress', "Processando arquivo...")
+            threading.Thread(target=self._process_file, args=(file_path,), daemon=True).start()
+        else:
+            self.ui_command('enable_buttons')
+            self.ui_command('update_status', "Operação cancelada")
+
+    def _process_file(self, file_path: str):
+        """Simula o processamento de um arquivo com barra de progresso."""
+        try:
+            total_steps = 100
+            for i in range(total_steps + 1):
+                time.sleep(0.05)  # Simula um processamento demorado
+                progress = int((i / total_steps) * 100)
+                self.ui_command('update_progress', progress, f"Processando... {progress}%")
+            
+            content = self.processor.extract_from_file(file_path)
+            self.processor.document_content = content
+
+            self.ui_command('update_status', "Selecione o template...")
+            template_path = filedialog.askopenfilename(
+                filetypes=[("Templates", "*.docx *.xlsx *.pdf")]
+            )
+            if template_path:
+                self.ui_command('update_status', "Gerando saída...")
+                output_path = filedialog.asksaveasfilename(
+                    defaultextension=os.path.splitext(template_path)[1]
+                )
+                if output_path:
+                    self.processor.fill_template(template_path, output_path, {"content": content})
+                    self.ui_command('show_info', "Arquivo processado com sucesso!")
+        except Exception as e:
+            self.ui_command('show_error', str(e))
+        finally:
+            self.ui_command('hide_progress')
+            self.ui_command('update_status', "Pronto para novas operações")
+            self.ui_command('enable_buttons')
+
+    def setup_ui_handler(self):
+        def check_queue():
+            try:
+                while not self.ui_queue.empty():
+                    action, *args = self.ui_queue.get_nowait()
+                    handler = {
+                        'show_progress': self.show_progress,
+                        'update_progress': self.update_progress,
+                        'hide_progress': self.hide_progress,
+                        'show_error': self.show_error,
+                        'show_info': self.show_info,
+                        'update_status': lambda x: self.status_var.set(f"» {x}"),
+                        'enable_buttons': self.enable_buttons,
+                        'disable_buttons': self.disable_buttons
+                    }.get(action)
+                    
+                    if handler:
+                        handler(*args) if args else handler()
+                        
+            except Exception as e:
+                print(f"Erro na fila: {str(e)}")
+            finally:
+                self.root.after(100, check_queue)
+
+        self.root.after(100, check_queue)
+
+
+    def ui_command(self, action, *args):
+        self.ui_queue.put((action, *args))
+            
+    def hide_progress(self):
+        if self.progress_window:
+            self.progress_bar.stop()
+            self.progress_window.grab_release()
+            self.progress_window.destroy()
+            self.progress_window = None
+            self.progress_bar = None
+
+    def show_error(self, message):
+        messagebox.showerror("Erro de Sistema", message)
+        self.ui_command('update_status', f"Erro: {message}")
+
+    def show_info(self, message):
+        messagebox.showinfo("Operação Concluída", message)
+        self.ui_command('update_status', message)
+
+    def enable_buttons(self):
+        if self.process_file_btn and self.scrape_btn and self.chat_btn and self.template_btn:
+            self.process_file_btn.config(state=tk.NORMAL)
+            self.scrape_btn.config(state=tk.NORMAL)
+            self.chat_btn.config(state=tk.NORMAL)
+            self.template_btn.config(state=tk.NORMAL)
+
+    def disable_buttons(self):
+        if self.process_file_btn and self.scrape_btn and self.chat_btn and self.template_btn:
+            self.process_file_btn.config(state=tk.DISABLED)
+            self.scrape_btn.config(state=tk.DISABLED)
+            self.chat_btn.config(state=tk.DISABLED)
+            self.template_btn.config(state=tk.DISABLED)
+
+    def process_file(self):
+        self.ui_command('disable_buttons')
+        self.ui_command('update_status', "Aguardando seleção de arquivo...")
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Documentos", "*.pdf *.docx *.xlsx *.txt"), ("Todos", "*.*")]
+        )
+        if file_path:
+            self.ui_command('update_status', "Processando arquivo...")
+            threading.Thread(target=self._process_file, args=(file_path,), daemon=True).start()
+        else:
+            self.ui_command('enable_buttons')
+            self.ui_command('update_status', "Operação cancelada")
+
+    def _process_file(self, file_path: str):
+        try:
+            self.ui_command('show_progress', "Decodificando arquivo...")
+            content = self.processor.extract_from_file(file_path)
+            self.processor.document_content = content
+
+            data = {"content": content}
+
+            self.ui_command('update_status', "Selecione o template...")
+            template_path = filedialog.askopenfilename(
+                filetypes=[("Templates", "*.docx *.xlsx *.pdf")]
+            )
+            if template_path:
+                self.ui_command('update_status', "Gerando saída...")
+                output_path = filedialog.asksaveasfilename(
+                    defaultextension=os.path.splitext(template_path)[1]
+                )
+                if output_path:
+                    self.processor.fill_template(template_path, output_path, data)
+                    self.ui_command('show_info', "Arquivo processado com sucesso!")
+        except Exception as e:
+            self.ui_command('show_error', str(e))
+        finally:
+            self.ui_command('hide_progress')
+            self.ui_command('update_status', "Pronto para novas operações")
+            self.ui_command('enable_buttons')
+
+
+    def scrape_website(self):
+        try:
+            self.ui_command('disable_buttons')
+            self.ui_command('update_status', "Aguardando URL...")
+
+            url = simpledialog.askstring("Scraping Web", "Digite a URL do site:")
+            if not url:
+                self.ui_command('enable_buttons')
+                self.ui_command('update_status', "Operação cancelada")
+                return
+
+            # Adicionar validação completa
+            if not url.startswith(('http://', 'https://')):
+                url = f'https://{url}'
+
+            if not validators.url(url):
+                raise ValueError("URL inválida")
+
+            self.ui_command('update_status', "Analisando site...")
+
+            # Adicionar headers para evitar bloqueio
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+
+            # Executa o scraping em uma thread separada
+            threading.Thread(target=self._scrape_and_process, args=(url,), daemon=True).start()
+
+        except requests.exceptions.RequestException as e:
+            self.ui_command('update_status', f"Erro ao acessar o site: {e}")
+            self.ui_command('enable_buttons')
+        except ValueError as e:
+            self.ui_command('update_status', str(e))
+            self.ui_command('enable_buttons')
+
+
+    def _scrape_and_process(self, url: str):
+        try:
+            self.ui_command('show_progress', "Coletando dados do site...")
+            data = self.processor.scrape_website(url)
+            self.processor.scraped_data = data
+
+            self.ui_command('update_status', "Selecione o template...")
+            template_path = filedialog.askopenfilename(
+                filetypes=[("Templates", "*.docx *.xlsx *.pdf")]
+            )
+            if template_path:
+                self.ui_command('update_status', "Gerando relatório...")
+                output_path = filedialog.asksaveasfilename(
+                    defaultextension=os.path.splitext(template_path)[1]
+                )
+                if output_path:
+                    self.processor.fill_template(template_path, output_path, data)
+                    self.ui_command('show_info', "Dados processados com sucesso!")
+        except Exception as e:
+            self.ui_queue.put(('show_error', str(e)))
+        finally:
+            self.ui_queue.put(('hide_progress',))
+            self.ui_queue.put(('update_status', "Pronto para novas operações"))
+            self.ui_queue.put(('enable_buttons',))
+
+    def create_template(self):
+        self.ui_command('disable_buttons')
+        template_type = simpledialog.askstring(
+            "Criar Template",
+            "Digite o tipo de template (docx/xlsx) e campos separados por vírgula:\n"
+            "Ex: docx, nome, data, valor"
+        )
+        
+        if template_type:
+            parts = [p.strip() for p in template_type.split(',')]
+            threading.Thread(
+                target=self._generate_template_thread,
+                args=(parts[0], parts[1:]),
+                daemon=True
+            ).start()
+
+    def _generate_template_thread(self, template_type: str, fields: list):
+        try:
+            self.ui_command('show_progress', "Gerando template com IA...")
+            output_path = self.processor.generate_template(template_type, fields)
+            self.ui_command('show_info', f"Template criado: {output_path}")
+        except Exception as e:
+            self.ui_command('show_error', str(e))
+        finally:
+            self.ui_command('hide_progress')
+            self.ui_command('enable_buttons')
+
+    def chat_with_ai(self):
+        chat_window = tk.Toplevel(self.root)
+        chat_window.title("Assistente IA")
+        chat_window.geometry("800x600")
+        chat_window.configure(bg=Config.CHAT_BG)
+
+        main_frame = tk.Frame(chat_window, bg=Config.CHAT_BG)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.chat_text = tk.Text(
+            main_frame,
+            wrap=tk.WORD,
+            bg=Config.CHAT_BG,
+            fg=Config.TEXT_COLOR,
+            font=('Segoe UI', 12),
+            state=tk.DISABLED
+        )
+        self.chat_text.pack(fill=tk.BOTH, expand=True)
+
+        input_frame = tk.Frame(main_frame, bg=Config.CHAT_BG)
+        input_frame.pack(fill=tk.X, pady=10)
+
+        self.input_entry = tk.Entry(
+            input_frame,
+            bg=Config.SECONDARY_COLOR,
+            fg=Config.TEXT_COLOR,
+            font=('Segoe UI', 12),
+            width=50
+        )
+        self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        def send_message():
+            user_input = self.input_entry.get().strip()
+            if user_input:
+                self.update_chat(f"Você: {user_input}", "user")
+                response = self.processor.generate_ai_response(user_input)
+                self.update_chat(f"IA: {response}", "ai")
+                self.input_entry.delete(0, tk.END)
+
+        self.input_entry.bind("<Return>", lambda e: send_message())
+
+        
+
+        # Reinicia o histórico ao abrir o chat
+        self.processor.chat_history = []
+        self.update_chat(
+            "╭───────────────────────────────────────╮\n"
+            "│         Assistente DataScan 1.0        │\n"
+            "╰───────────────────────────────────────╯\n"
+            "\n🔍 Como posso ajudar com seus dados hoje?\n"
+            "──────────────────────────────────────────\n", 
+            "system"
+        )
+        
+    def upload_file_for_chat(self, parent_window):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Documentos", "*.pdf *.docx *.xlsx *.txt"), ("Todos", "*.*")]
+        )
+        if file_path:
+            try:
+                content = self.processor.extract_from_file(file_path)
+                self.processor.document_content = content
+                self.update_chat(f"Sistema: Arquivo carregado com sucesso: {os.path.basename(file_path)}\n", "system")
+                self.update_chat(f"Resumo do documento:\n{content[:500]}...\n\n", "file")
+            except Exception as e:
+                self.update_chat(f"Erro ao processar arquivo: {str(e)}\n", "error")
+
+    def clear_chat_context(self):
+        self.processor.chat_context = []
+        self.update_chat("Sistema: Contexto da conversa limpo com sucesso\n", "system")
+
+    def process_query(self, window):
+        query = self.input_entry.get().strip()
+        self.input_entry.delete(0, tk.END)
+        if not query:
+            return
+
+        # Aplicar limpeza no input
+        query = self.clean_input(query)
+
+        self.update_chat(f"Você: {query}\n", "user")
+
+        try:
+            if self.is_command(query):
+                self.handle_command(query)
+            else:
+                threading.Thread(
+                    target=self.generate_context_aware_response,
+                    args=(query,),
+                    daemon=True
+                ).start()
+
+        except Exception as e:
+            self.update_chat(f"Erro: {str(e)}\n", "error")
+                
+    def generate_context_aware_response(self, query: str):
+        """Gera uma resposta contextualizada com formatação correta"""
+        try:
+            start_time = time.time()
+            
+            # Gera resposta crua da IA
+            raw_response = self.processor.generate_ai_response(query)
+            
+            # Processa a resposta para remover formatação indesejada
+            cleaned_response = self.clean_ai_output(raw_response)
+            
+            elapsed_time = time.time() - start_time
+            
+            # Formatação profissional da resposta
+            formatted_response = (
+                f"\n[IA • {elapsed_time:.2f}s]\n"
+                f"➤ {cleaned_response}\n"
+                f"{'─' * 60}\n"
+            )
+            
+            self.update_chat(formatted_response, "ai")
+            
+        except Exception as e:
+            self.update_chat(f"\n❌ Erro: {str(e)}\n", "error")
+            
+            
+    def clean_ai_output(self, text: str) -> str:
+        """Remove artefatos de formatação indesejados"""
+        patterns = [
+            r'<.*?>',          # Tags HTML
+            r'\b\d+\.\s*',     # Listas numeradas
+            r'[-=]{4,}',       # Linhas divisórias
+            r'Resposta:\s*',   # Marcadores de resposta
+            r'^[\W_]+|[\W_]+$' # Caracteres especiais no início/fim
+        ]
+        
+        for pattern in patterns:
+            text = re.sub(pattern, '', text, flags=re.IGNORECASE|re.MULTILINE)
+        
+        # Correção de formatação
+        text = text.replace('  ', ' ').strip()
+        
+        if len(text) > 0:
+            # Capitalização inteligente
+            text = text[0].upper() + text[1:]
+            if text[-1] not in {'.', '!', '?'}:
+                text += '.'
+                
+        return text
+            
+    def handle_command(self, query: str):
+        """Executa comandos especiais."""
+        command_map = {
+            '/criar template': self.handle_template_creation,
+            '/processar arquivo': self.process_file,  # Alterado para process_file
+            '/analisar site': self.scrape_website,    # Alterado para scrape_website
+            '/ajuda': self.show_help,
+            '/limpar': self.clear_chat_context,
+            '/sair': lambda: self.root.quit()
+        }
+        
+        for cmd, handler in command_map.items():
+            if cmd in query.lower():
+                handler()
+                return
+
+
+    def handle_template_creation(self, query: str):
+        try:
+            self.update_chat("Assistente: Analisando sua solicitação...\n", "system")
+            
+            prompt = (
+                f"Com base na seguinte solicitação: '{query}'\n"
+                "Identifique:\n"
+                "1. Tipo de documento (docx/xlsx)\n"
+                "2. Campos necessários\n"
+                "3. Formatação especial\n"
+                "Retorne no formato JSON:"
+                '{"type": "docx", "fields": ["nome", "data"], "instructions": "..."}'
+            )
+            
+            response = self.processor.generate_ai_response(prompt)
+            params = json.loads(response)
+            
+            self.update_chat(
+                f"Assistente: Criando template {params['type'].upper()} com campos: "
+                f"{', '.join(params['fields'])}\n",
+                "system"
+            )
+            
+            template_path = self.processor.generate_template(
+                params['type'],
+                params['fields']
+            )
+            
+            self.update_chat(
+                f"✅ Template criado com sucesso!\n"
+                f"📂 Caminho: {template_path}\n"
+                f"📝 Instruções: {params.get('instructions', 'Nenhuma')}\n\n",
+                "success"
+            )
+            
+        except Exception as e:
+            self.update_chat(f"❌ Erro na criação: {str(e)}\n", "error")
+
+
+    def generate_response(self, query, window):
+        try:
+            start_time = time.time()
+            response = self.processor.generate_ai_response(query)
+            elapsed_time = time.time() - start_time
+            
+            # Formatar resposta corretamente
+            formatted_response = f"IA ({elapsed_time:.2f}s):\n{response}\n"
+            formatted_response += "―" * 50 + "\n"
+            
+            self.update_chat(formatted_response, "ai")
+        except Exception as e:
+            self.update_chat(f"Erro: {str(e)}\n", "error")
+            
+            
+    def show_help(self):
+        help_text = """Comandos disponíveis:
+/ajuda - Mostra esta mensagem
+/limpar - Limpa o contexto da conversa
+/sair - Fecha o chat
+/carregar - Abre diálogo para carregar arquivo
+/criar template - Cria um novo template com IA
+"""
+        self.update_chat(f"Sistema:\n{help_text}\n", "system")
+
+    def update_chat(self, message: str, msg_type: str) -> None:
+        # Mapeamento de cores para cada tipo de mensagem
+        color_map = {
+            "user": "#CFD8DC",      # Cinza claro
+            "system": "#81D4FA",    # Azul claro
+            "error": "#EF9A9A",     # Vermelho claro
+            "ai": "#C5E1A5",        # Verde claro
+            "success": "#A5D6A7",   # Verde suave
+            "file": "#90CAF9"       # Azul pastel
+        }
+
+        # Configura o estado do chat_text para edição
+        self.chat_text.config(state=tk.NORMAL)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.chat_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        self.chat_text.insert(tk.END, f"{message}\n", msg_type)
+        self.chat_text.see(tk.END)
+        self.chat_text.config(state=tk.DISABLED)
+
+        # Insere a mensagem com a formatação correta
+        self.chat_text.insert(tk.END, f"{message}\n", msg_type)
+
+        # Rola para o final do texto
+        self.chat_text.see(tk.END)
+
+        # Desabilita a edição do chat_text
+        self.chat_text.config(state=tk.DISABLED)
+
+    def setup_db_explorer(self):
+        """Janela para explorar a estrutura do banco de dados"""
+        self.explorer_window = tk.Toplevel(self.root)
+        self.explorer_window.title("Explorador de Banco de Dados")
+        self.explorer_window.geometry("600x400")
+        
+        self.tree = ttk.Treeview(self.explorer_window)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        
+        vsb = ttk.Scrollbar(self.explorer_window, orient="vertical", command=self.tree.yview)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.configure(yscrollcommand=vsb.set)
+        
+        self.explorer_window.withdraw()
+
+    def show_db_explorer(self):
+        """Atualiza e exibe o explorador de banco de dados"""
+        try:
+            schema = self.processor.db_manager.get_schema()
+            self.tree.delete(*self.tree.get_children())
+            
+            for table in schema['tables']:
+                table_id = self.tree.insert("", "end", text=table['name'], values=["Table"])
+                for column in table['columns']:
+                    self.tree.insert(table_id, "end", 
+                                   text=f"{column['name']} ({column['type']})",
+                                   values=["Column"])
+            
+            self.explorer_window.deiconify()
+        except Exception as e:
+            self.show_error(str(e))
+
+    def create_backup(self):
+        """Cria backup compactado do diretório de processamento"""
+        try:
+            if not os.path.exists(Config.TEMP_DIR):
+                raise ValueError("Nenhum dado para backup encontrado")
+                
+            backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+            backup_path = os.path.join(Config.BACKUP_DIR, backup_name)
+            
+            with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, _, files in os.walk(Config.TEMP_DIR):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, Config.TEMP_DIR)
+                        zipf.write(file_path, arcname)
+                        
+            self.show_info(f"Backup criado com sucesso em:\n{backup_path}")
+            return backup_path
+            
+        except Exception as e:
+            self.show_error(f"Falha no backup: {str(e)}")
+            return None
+
+    def show_chart(self, data: dict):
+        """Exibe os dados em formato gráfico"""
+        if self.current_chart_window:
+            self.current_chart_window.destroy()
+            
+        self.current_chart_window = tk.Toplevel(self.root)
+        self.current_chart_window.title("Visualização de Dados")
+        
+        fig = plt.Figure(figsize=(6, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        
+        if isinstance(data, list) and len(data) > 0:
+            df = pd.DataFrame(data)
+            df.plot(kind='bar', ax=ax)
+            
+            canvas = FigureCanvasTkAgg(fig, master=self.current_chart_window)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+
+
+if __name__ == "__main__":
+    processor = DocumentProcessor()
+    response = processor.generate_ai_response("Como criar um template DOCX?")
+    print(response)
+    if not os.path.exists(Config.TEMP_DIR):
+        os.makedirs(Config.TEMP_DIR)
+    if not os.path.exists(Config.BACKUP_DIR):
+        os.makedirs(Config.BACKUP_DIR)
+        
+    app = Application()
+    app.root.mainloop()

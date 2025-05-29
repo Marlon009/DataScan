@@ -1,7 +1,8 @@
 📌 Sobre o Projeto  
 #DataScan- Versão BETA
 
-![datascan](https://github.com/user-attachments/assets/0417b1aa-56e6-4eb1-91cc-b36d12dd072c)
+![conversor2](https://github.com/user-attachments/assets/3e51ee7c-b28b-4131-8708-835d18ed607a)
+
 
 
 

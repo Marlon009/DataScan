@@ -13,10 +13,10 @@ DataScan é uma aplicação desktop para processamento inteligente de dados, int
 
 - 🖥️ Processamento de documentos (PDF, DOCX, XLSX, TXT)
 - 🌐 Scraping web com análise de conteúdo
-- 🤖 Assistente IA integrado
-- 💾 Backup automatizado
-- 📊 Geração de relatórios PDF
-- 🧩 Criação de templates via IA
+- 🤖 Assistente IA integrado(andamento)
+- 💾 Backup automatizado(andamento)
+- 📊 Geração de relatórios PDF(andamento)
+- 🧩 Criação de templates via IA(andamento)
 
 ## Tecnologias
 

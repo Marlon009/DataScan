@@ -27,18 +27,8 @@ class DataScan(QMainWindow):
             pass
             
         self.init_ui()
+        self.apply_light_theme()  # Tema claro por padrão
         
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Return and not event.modifiers():
-            current_tab = self.tabs.currentIndex()
-            
-            if current_tab == 1:  # Aba Web
-                self.scrape_web()
-            elif current_tab == 2:  # Aba IA
-                self.handle_ai_input()
-        else:
-            super().keyPressEvent(event)
-
     def init_ui(self):
         # Criar barra de menu
         self.create_menu_bar()
@@ -56,135 +46,22 @@ class DataScan(QMainWindow):
         # File Processing Tab
         file_tab = QWidget()
         self.init_file_tab(file_tab)
-        self.tabs.addTab(file_tab, self.create_tab_icon("📁"), "Arquivos")
+        self.tabs.addTab(file_tab, "📁 Arquivos")
 
         # Web Scraping Tab
         web_tab = QWidget()
         self.init_web_tab(web_tab)
-        self.tabs.addTab(web_tab, self.create_tab_icon("🌐"), "Web")
+        self.tabs.addTab(web_tab, "🌐 Web")
 
         # AI Terminal Tab
         ai_tab = QWidget()
         self.init_ai_tab(ai_tab)
-        self.tabs.addTab(ai_tab, self.create_tab_icon("🤖"), "IA")
-
-    def init_file_tab(self, tab):
-        layout = QVBoxLayout(tab)
-        
-        # File Selection
-        file_layout = QHBoxLayout()
-        self.file_path = QLineEdit()
-        btn_browse = QPushButton("Selecionar Arquivo")
-        btn_browse.clicked.connect(self.browse_file)
-        
-        file_layout.addWidget(self.file_path)
-        file_layout.addWidget(btn_browse)
-        
-        # Preview
-        self.preview = QTextEdit()
-        
-        # Processing
-        btn_process = QPushButton("Processar")
-        btn_process.clicked.connect(self.process_file)
-        
-        layout.addLayout(file_layout)
-        layout.addWidget(self.preview)
-        layout.addWidget(btn_process)
-        
-    def create_tab_icon(self, emoji):
-        label = QLabel(emoji)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        return label
-
-    def init_web_tab(self, tab):
-        layout = QVBoxLayout(tab)
-        
-        # URL Input
-        url_layout = QHBoxLayout()
-        self.url_input = QLineEdit()
-        btn_scrape = QPushButton("Escanear")
-        btn_scrape.clicked.connect(self.scrape_web)
-        
-        url_layout.addWidget(QLabel("URL:"))
-        url_layout.addWidget(self.url_input)
-        url_layout.addWidget(btn_scrape)
-        
-        # Results
-        self.web_results = QTextEdit()
-        
-        # Export Buttons
-        export_layout = QHBoxLayout()
-        btn_export_pdf = QPushButton("Exportar PDF")
-        btn_export_excel = QPushButton("Exportar Excel")
-        btn_export_docx = QPushButton("Exportar DOCX")
-        
-        btn_export_pdf.clicked.connect(lambda: self.export_web_results('pdf'))
-        btn_export_excel.clicked.connect(lambda: self.export_web_results('excel'))
-        btn_export_docx.clicked.connect(lambda: self.export_web_results('docx'))
-        
-        export_layout.addWidget(btn_export_pdf)
-        export_layout.addWidget(btn_export_excel)
-        export_layout.addWidget(btn_export_docx)
-        
-        layout.addLayout(url_layout)
-        layout.addWidget(self.web_results)
-        layout.addLayout(export_layout)
-
-    def init_ai_tab(self, tab):
-        layout = QVBoxLayout(tab)
-        
-        # API Key Section
-        key_layout = QHBoxLayout()
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("Cole sua API Key do Gemini aqui...")
-        btn_save_key = QPushButton("🔑 Salvar")
-        btn_save_key.clicked.connect(self.save_api_key)
-        
-        key_layout.addWidget(self.api_key_input)
-        key_layout.addWidget(btn_save_key)
-        
-        # Chat history
-        self.chat_history = QTextEdit()
-        self.chat_history.setReadOnly(True)
-        
-        # User input
-        input_layout = QHBoxLayout()
-        self.ai_input_ia = QLineEdit()
-        self.ai_input_ia.setPlaceholderText("Digite sua solicitação...")
-        btn_send = QPushButton("🚀 Enviar")
-        btn_send.clicked.connect(self.handle_ai_input)
-        
-        input_layout.addWidget(self.ai_input_ia)
-        input_layout.addWidget(btn_send)
-        
-        layout.addLayout(key_layout)
-        layout.addWidget(self.chat_history)
-        layout.addLayout(input_layout)
-
-    def save_api_key(self):
-        key = self.api_key_input.text().strip()
-        if key:
-            self.ai = AITerminal(api_key=key)
-            QMessageBox.information(self, "Sucesso", "Chave configurada com sucesso!")
-        else:
-            QMessageBox.warning(self, "Aviso", "Insira uma API Key válida!")
+        self.tabs.addTab(ai_tab, "🤖 IA")
 
     def create_menu_bar(self):
         menubar = self.menuBar()
         
         # Menu Arquivo
-        file_menu = menubar.addMenu("Arquivo")
-        
-        new_action = QAction("Novo", self)
-        open_action = QAction("Abrir...", self)
-        save_action = QAction("Salvar", self)
-        exit_action = QAction("Sair", self)
-        
-        file_menu.addAction(new_action)
-        file_menu.addAction(open_action)
-        file_menu.addAction(save_action)
-        file_menu.addSeparator()
-        file_menu.addAction(exit_action)
         
         # Menu Visualização
         view_menu = menubar.addMenu("Visualização")
@@ -338,6 +215,102 @@ class DataScan(QMainWindow):
                 color: white;
             }
         """)
+
+    def init_file_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        
+        # File Selection
+        file_layout = QHBoxLayout()
+        self.file_path = QLineEdit()
+        btn_browse = QPushButton("Selecionar Arquivo")
+        btn_browse.clicked.connect(self.browse_file)
+        
+        file_layout.addWidget(self.file_path)
+        file_layout.addWidget(btn_browse)
+        
+        # Preview
+        self.preview = QTextEdit()
+        
+        # Processing
+        btn_process = QPushButton("Processar")
+        btn_process.clicked.connect(self.process_file)
+        
+        layout.addLayout(file_layout)
+        layout.addWidget(self.preview)
+        layout.addWidget(btn_process)
+
+    def init_web_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        
+        # URL Input
+        url_layout = QHBoxLayout()
+        self.url_input = QLineEdit()
+        btn_scrape = QPushButton("Escanear")
+        btn_scrape.clicked.connect(self.scrape_web)
+        
+        url_layout.addWidget(QLabel("URL:"))
+        url_layout.addWidget(self.url_input)
+        url_layout.addWidget(btn_scrape)
+        
+        # Results
+        self.web_results = QTextEdit()
+        
+        # Export Buttons
+        export_layout = QHBoxLayout()
+        btn_export_pdf = QPushButton("Exportar PDF")
+        btn_export_excel = QPushButton("Exportar Excel")
+        btn_export_docx = QPushButton("Exportar DOCX")
+        
+        btn_export_pdf.clicked.connect(lambda: self.export_web_results('pdf'))
+        btn_export_excel.clicked.connect(lambda: self.export_web_results('excel'))
+        btn_export_docx.clicked.connect(lambda: self.export_web_results('docx'))
+        
+        export_layout.addWidget(btn_export_pdf)
+        export_layout.addWidget(btn_export_excel)
+        export_layout.addWidget(btn_export_docx)
+        
+        layout.addLayout(url_layout)
+        layout.addWidget(self.web_results)
+        layout.addLayout(export_layout)
+
+    def init_ai_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        
+        # API Key Section
+        key_layout = QHBoxLayout()
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("Cole sua API Key do Gemini aqui...")
+        btn_save_key = QPushButton("🔑 Salvar")
+        btn_save_key.clicked.connect(self.save_api_key)
+        
+        key_layout.addWidget(self.api_key_input)
+        key_layout.addWidget(btn_save_key)
+        
+        # Chat history
+        self.chat_history = QTextEdit()
+        self.chat_history.setReadOnly(True)
+        
+        # User input
+        input_layout = QHBoxLayout()
+        self.ai_input_ia = QLineEdit()
+        self.ai_input_ia.setPlaceholderText("Digite sua solicitação...")
+        btn_send = QPushButton("🚀 Enviar")
+        btn_send.clicked.connect(self.handle_ai_input)
+        
+        input_layout.addWidget(self.ai_input_ia)
+        input_layout.addWidget(btn_send)
+        
+        layout.addLayout(key_layout)
+        layout.addWidget(self.chat_history)
+        layout.addLayout(input_layout)
+
+    def save_api_key(self):
+        key = self.api_key_input.text().strip()
+        if key:
+            self.ai = AITerminal(api_key=key)
+            QMessageBox.information(self, "Sucesso", "Chave configurada com sucesso!")
+        else:
+            QMessageBox.warning(self, "Aviso", "Insira uma API Key válida!")
 
     def browse_file(self):
         path, _ = QFileDialog.getOpenFileName(
